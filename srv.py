@@ -42,10 +42,13 @@ class Manipulator:
         self.lib.RI_SDK_InitSDK.argtypes = [c_int, c_char_p]
         self.lib.RI_SDK_CreateModelComponent.argtypes = [c_char_p, c_char_p, c_char_p, POINTER(c_int), c_char_p]
         self.lib.RI_SDK_LinkPWMToController.argtypes = [c_int, c_int, c_uint8, c_char_p]
+        self.lib.RI_SDK_LinkVoltageSensorToController.argtypes = [c_int, c_int, c_uint8, c_char_p]
+        self.lib.RI_SDK_sensor_VoltageSensor_Current.argtypes = [c_int, POINTER(c_float), c_char_p]
         self.lib.RI_SDK_DestroySDK.argtypes = [c_bool, c_char_p]
         self.lib.RI_SDK_sigmod_PWM_SetPortDutyCycle.argtypes = [c_int, c_int, c_int, c_int, c_char_p]
 
-
+        self.sensor = c_int()
+        self.current = c_float()
         self.errTextC = create_string_buffer(1000)  # Текст ошибки. C type: char*
         self.i2c = c_int()
         self.pwm = c_int()
@@ -69,6 +72,16 @@ class Manipulator:
             print(errCode, self.errTextC.raw.decode())
             sys.exit(2)
 
+        errCode = self.lib.RI_SDK_CreateModelComponent(b"sensor", b"voltage_sensor", b"ina219", self.sensor, self.errTextC)
+        if errCode != 0:
+            print("Sensor create error:", self.errTextC.raw.decode());
+            sys.exit(1)
+        print("Sensor descriptor:", self.sensor.value)
+
+        errCode = self.lib.RI_SDK_LinkVoltageSensorToController(self.sensor, self.i2c, 0x41, self.errTextC)
+        if errCode != 0:
+            print("Link error:", self.errTextC.raw.decode());
+            sys.exit(1)
         # Связывание i2c с ШИМ
         errCode = self.lib.RI_SDK_LinkPWMToController(self.pwm, self.i2c, 0x40, self.errTextC)
         if errCode != 0:
@@ -80,7 +93,11 @@ class Manipulator:
         self.Side = Servo(self.lib, 2, self.pwm)
         self.RHand = Servo(self.lib, 4, self.pwm)
     def GetHandVoltage(self):
-        errCode = self.lib.RI_SDK_
+        errCode = self.lib.RI_SDK_sensor_VoltageSensor_Current(self.sensor, self.current, self.errTextC)
+        if errCode != 0:
+            print("Read error:", self.errTextC.raw.decode());
+            sys.exit(1)
+        return self.current.value
 
     def __del__(self):
         # Удаление библиотеки со всеми компонентами
