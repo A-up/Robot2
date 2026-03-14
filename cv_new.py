@@ -248,7 +248,7 @@ def detect_cubes(
     """Совместимость со старым кодом: вернуть (pos_xy, yaw) для одного marker_id."""
     res = detect_cubes_multi([marker_id], frame, detector, real_points, camera_matrix, dist_coeffs, marker_length)
     if res is None or marker_id not in res:
-        return Noneq
+        return None
     pos_field, yaw = res[marker_id]
     return pos_field[:2], yaw
 
@@ -382,17 +382,17 @@ if __name__ == "__main__":
             continue
             #print(side)
         if cnt < 4:
-            man.Up.SetSyncServoRotation(-100)
+            man.Up.SetSyncServoRotation(-90)
             time.sleep(1)
-            man.RHand.SetSyncServoRotation(0)
-            man.Base.SetAsyncServoRotation(-60 + 30*cnt)
-            man.Side.SetAsyncServoRotation(-82)
+            man.RHand.SetSyncServoRotation(90)
+            man.Base.SetAsyncServoRotation(-15 + 30*(cnt < 2))
+            man.Side.SetAsyncServoRotation(-67+15*(cnt%2==1))
             time.sleep(2)
-            man.Up.SetSyncServoRotation(-30)
+            man.Up.SetSyncServoRotation(-42-30*(cnt%2==1))
             time.sleep(2)
             man.Hand.SetSyncServoRotation(40)
             man.Side.SetAsyncServoRotation(-80)
-            man.Up.SetSyncServoRotation(-10)
+            #man.Up.SetSyncServoRotation(-10)
             man.Side.SetAsyncServoRotation(-65)
             man.Up.SetSyncServoRotation(-90)
         cnt += 1

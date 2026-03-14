@@ -79,7 +79,8 @@ class Manipulator:
         self.Up = Servo(self.lib, 3, self.pwm)
         self.Side = Servo(self.lib, 2, self.pwm)
         self.RHand = Servo(self.lib, 4, self.pwm)
-
+    def GetHandVoltage(self):
+        errCode = self.lib.RI_SDK_
 
     def __del__(self):
         # Удаление библиотеки со всеми компонентами
@@ -88,3 +89,5 @@ class Manipulator:
             print(errCode, self.errTextC.raw.decode())
             sys.exit(2)
 
+if __name__ == "__main__":
+    man = Manipulator()
