@@ -4,39 +4,167 @@ import cv2
 import numpy as np
 from cv2 import aruco
 from srv import Manipulator
-def search_for(man, index):
-    cap = cv2.VideoCapture(1)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-    aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
-    parameters = aruco.DetectorParameters()
-    parameters.minMarkerPerimeterRate = 0.01
-    parameters.cornerRefinementWinSize = 5
-    parameters.cornerRefinementMaxIterations = 30
-    parameters.cornerRefinementMinAccuracy = 0.1
 
-    FRAME_CENTER = np.array((1920 / 2, 1080 / 2))
-    detector = aruco.ArucoDetector(aruco_dict, parameters)
-    man.Up.SetSyncServoRotation(-90)
-    man.RHand.SetSyncServoRotation(0)
-    for side in range(100, -50, -40):
-        man.Side.SetSyncServoRotation(side)
-        for ang in range(-100, 100, 5):
-            ret, frame = cap.read()
-            # frame = cv2.flip(frame, 0)
-            if not ret:
-                continue
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            corners, ids, _ = detector.detectMarkers(gray)
-            man.Base.SetSyncServoRotation(ang)
-            if ids is not None:
-                if index in ids.flatten():
-                    cap.release()
-                    cv2.destroyAllWindows()
-                    return ang, side
-            cv2.imshow("frame", frame)
-            if cv2.waitKey(100) & 0xFF == ord('q'):
-                break
+# -----------------------------
+# Lighting-robust ArUco helpers
+# -----------------------------
+FILTERS_AFTER_SEC = 5.0  # после этого времени включаем "тяжёлые" фильтры
+
+_PREPROC_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+
+def _to_gray(img):
+    if img is None:
+        return None
+    if len(img.shape) == 2:
+        return img
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+
+def _auto_gamma_from_mean(mean_val: float) -> float:
+    # mean > ~170: пересвет -> затемняем (gamma > 1)
+    # mean < ~80:  темно -> осветляем (gamma < 1)
+    if mean_val > 180:
+        return 1.9
+    if mean_val > 155:
+        return 1.5
+    if mean_val < 65:
+        return 0.7
+    if mean_val < 90:
+        return 0.85
+    return 1.0
+
+
+def _apply_gamma(gray: np.ndarray, gamma: float) -> np.ndarray:
+    if gamma == 1.0:
+        return gray
+    lut = np.array(
+        [np.clip((i / 255.0) ** gamma * 255.0, 0, 255) for i in range(256)],
+        dtype=np.uint8,
+    )
+    return cv2.LUT(gray, lut)
+
+
+def preprocess_for_aruco(frame, mode: str):
+    gray = _to_gray(frame)
+    if gray is None:
+        return None
+
+    if mode == "raw":
+        return gray
+
+    if mode == "clahe":
+        return _PREPROC_CLAHE.apply(gray)
+
+    if mode == "gamma":
+        m = float(np.mean(gray))
+        g = _auto_gamma_from_mean(m)
+        return _apply_gamma(gray, g)
+
+    if mode == "equalize":
+        return cv2.equalizeHist(gray)
+
+    if mode == "adapt":
+        g = cv2.medianBlur(gray, 3)
+        return cv2.adaptiveThreshold(
+            g, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31, 7
+        )
+
+    if mode == "adapt_inv":
+        b = preprocess_for_aruco(frame, "adapt")
+        return cv2.bitwise_not(b) if b is not None else None
+
+    raise ValueError(f"Unknown preprocess mode: {mode}")
+
+
+def make_detector_presets(aruco_dict, base_min_perimeter: float):
+    """3 пресета под разный свет/контраст."""
+    dets = []
+
+    # Preset 0: базовый
+    p0 = aruco.DetectorParameters()
+    p0.minMarkerPerimeterRate = base_min_perimeter
+    p0.cornerRefinementWinSize = 5
+    p0.cornerRefinementMaxIterations = 30
+    p0.cornerRefinementMinAccuracy = 0.1
+    dets.append(aruco.ArucoDetector(aruco_dict, p0))
+
+    # Preset 1: harsh light / glare
+    p1 = aruco.DetectorParameters()
+    p1.minMarkerPerimeterRate = max(0.012, base_min_perimeter * 0.8)
+    p1.cornerRefinementWinSize = 5
+    p1.cornerRefinementMaxIterations = 30
+    p1.cornerRefinementMinAccuracy = 0.1
+    p1.adaptiveThreshWinSizeMin = 5
+    p1.adaptiveThreshWinSizeMax = 75
+    p1.adaptiveThreshWinSizeStep = 10
+    p1.adaptiveThreshConstant = 3
+    dets.append(aruco.ArucoDetector(aruco_dict, p1))
+
+    # Preset 2: low contrast / mixed shadows
+    p2 = aruco.DetectorParameters()
+    p2.minMarkerPerimeterRate = max(0.010, base_min_perimeter * 0.6)
+    p2.cornerRefinementWinSize = 5
+    p2.cornerRefinementMaxIterations = 30
+    p2.cornerRefinementMinAccuracy = 0.1
+    p2.adaptiveThreshWinSizeMin = 7
+    p2.adaptiveThreshWinSizeMax = 101
+    p2.adaptiveThreshWinSizeStep = 12
+    p2.adaptiveThreshConstant = 10
+    dets.append(aruco.ArucoDetector(aruco_dict, p2))
+
+    return dets
+
+
+def _as_detectors(detector_or_list):
+    if isinstance(detector_or_list, (list, tuple)):
+        return list(detector_or_list)
+    return [detector_or_list]
+
+
+
+def detect_markers_best(frame, detector_or_list, budget: str):
+    """Вернуть corners, ids с fallback по предобработке и пресетам.
+    budget: "fast" (только raw) или "full" (raw+clahe+gamma+equalize+adapt+adapt_inv)
+    """
+    detectors = _as_detectors(detector_or_list)
+    modes = ("raw",) if budget == "fast" else ("raw", "clahe", "gamma", "equalize", "adapt", "adapt_inv")
+
+    best_corners, best_ids = None, None
+    best_score = -1
+
+    for mode in modes:
+        img = preprocess_for_aruco(frame, mode)
+        if img is None:
+            continue
+
+        for det in detectors:
+            corners, ids, _ = det.detectMarkers(img)
+            total = 0 if ids is None else len(ids)
+            score = total  # простой скоринг: больше маркеров = лучше
+            if score > best_score:
+                best_score = score
+                best_corners, best_ids = corners, ids
+
+            # ранний выход: в fast режиме raw уже что-то нашёл
+            if budget == "fast" and ids is not None and len(ids) > 0:
+                return corners, ids
+
+    return best_corners, best_ids
+
+
+def find_marker_index(ids, marker_id):
+    if ids is None:
+        return None
+    flat = ids.flatten()
+    matches = np.where(flat == int(marker_id))[0]
+    if len(matches) == 0:
+        return None
+    return int(matches[0])
+
 
 #def put_cube(man, index, base, side):
 
@@ -50,7 +178,9 @@ def take_cube(cap, man, index, base, side, up):
     parameters.cornerRefinementWinSize = 5
     parameters.cornerRefinementMaxIterations = 30
     parameters.cornerRefinementMinAccuracy = 0.1
-    detector = aruco.ArucoDetector(aruco_dict, parameters)
+    detectors = make_detector_presets(aruco_dict, base_min_perimeter=0.01)
+    take_phase_start = time.time()
+
     base_ang = base
     side_ang = side
     up_ang = up
@@ -70,12 +200,14 @@ def take_cube(cap, man, index, base, side, up):
             continue
         h, w = frame.shape[:2]
         frame_center = np.array([w//2, h//2])
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        use_full = (time.time() - take_phase_start) >= FILTERS_AFTER_SEC
+        budget = "full" if use_full else "fast"
+        corners, ids = detect_markers_best(frame, detectors, budget=budget)
 
-        corners, ids, _ = detector.detectMarkers(gray)
+        target_idx = find_marker_index(ids, index)
+        if target_idx is not None:
+            corners = corners[target_idx][0]
 
-        if ids is not None and index in ids.flatten():
-            corners = corners[list(ids).index(index)][0]
             pts = corners.astype(np.float32)
             area = cv2.contourArea(pts)
             #print("Area:", area)
@@ -137,7 +269,7 @@ def take_cube(cap, man, index, base, side, up):
                 man.Side.SetSyncServoRotation(side_ang)
 
 
-                up_ang += 60
+                up_ang += 55
                 man.Up.SetSyncServoRotation(up_ang)
                 man.Hand.SetSyncServoRotation(-80)
                 up_ang -= 70
@@ -148,8 +280,11 @@ def take_cube(cap, man, index, base, side, up):
                 break
         else:
             t += 1
-        if t >= 50:
+        # даём алгоритму минимум 12 сек на поиск/дожим,
+        # при этом фильтры включатся автоматически после FILTERS_AFTER_SEC
+        if (time.time() - take_phase_start) >= 100.0:
             break
+
         #man.Base.SetSyncServoRotation(base_ang)
         #man.Side.SetSyncServoRotation(side_ang)
         #man.RHand.SetSyncServoRotation(rhand_ang)
@@ -161,7 +296,3 @@ def take_cube(cap, man, index, base, side, up):
     cv2.destroyAllWindows()
     #cap.release()
 
-if __name__ == '__main__':
-    man = Manipulator()
-    base, side = search_for(man, 6)
-    take_cube(man, 6, base, side)

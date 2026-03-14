@@ -6,6 +6,210 @@ import numpy as np
 from math import dist
 # Если хотите отладку — поставьте True
 DEBUG_PRINT = False
+# -----------------------------
+# Lighting-robust ArUco helpers
+# -----------------------------
+# Идея: сначала пытаемся "как есть" (быстро), если не нашли/поймали мало маркеров —
+# пробуем несколько предобработок (CLAHE / gamma / equalize / adaptive binarization)
+# и пару пресетов DetectorParameters.
+#
+# Это НЕ меняет общую логику: top-камера -> rough -> wrist-камера.
+# Просто повышает шанс детекта при засветах/тенях.
+_PREPROC_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+
+def _to_gray(img):
+    if img is None:
+        return None
+    if len(img.shape) == 2:
+        return img
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+
+def _auto_gamma_from_mean(mean_val: float) -> float:
+    # mean > 170: заметный пересвет -> затемняем (gamma > 1)
+    # mean < 80:  темно -> осветляем (gamma < 1)
+    if mean_val > 180:
+        return 1.9
+    if mean_val > 155:
+        return 1.5
+    if mean_val < 65:
+        return 0.7
+    if mean_val < 90:
+        return 0.85
+    return 1.0
+
+
+def _apply_gamma(gray: np.ndarray, gamma: float) -> np.ndarray:
+    if gamma == 1.0:
+        return gray
+    lut = np.array(
+        [np.clip((i / 255.0) ** gamma * 255.0, 0, 255) for i in range(256)],
+        dtype=np.uint8,
+    )
+    return cv2.LUT(gray, lut)
+
+
+def preprocess_for_aruco(frame, mode: str):
+    gray = _to_gray(frame)
+    if gray is None:
+        return None
+
+    if mode == "raw":
+        return gray
+
+    if mode == "clahe":
+        return _PREPROC_CLAHE.apply(gray)
+
+    if mode == "gamma":
+        m = float(np.mean(gray))
+        g = _auto_gamma_from_mean(m)
+        return _apply_gamma(gray, g)
+
+    if mode == "equalize":
+        return cv2.equalizeHist(gray)
+
+    # Внимание: detectMarkers сам делает adaptive threshold.
+    # Но при жёстких засветах иногда помогает "подсказать" ему более контрастный бинарь.
+    if mode == "adapt":
+        g = cv2.medianBlur(gray, 3)
+        return cv2.adaptiveThreshold(
+            g, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31, 7
+        )
+
+    if mode == "adapt_inv":
+        b = preprocess_for_aruco(frame, "adapt")
+        return cv2.bitwise_not(b) if b is not None else None
+
+    raise ValueError(f"Unknown preprocess mode: {mode}")
+
+
+def make_detector_presets(aruco_dict, base_min_perimeter: float = 0.03):
+    """Готовим 3 детектора:
+    0) базовый (как у вас сейчас)
+    1) harsh light (больше окно адаптивного порога, другой constant)
+    2) low contrast (ещё шире окна, другой constant)
+    """
+    dets = []
+
+    # Preset 0
+    p0 = aruco.DetectorParameters()
+    p0.minMarkerPerimeterRate = base_min_perimeter
+    p0.cornerRefinementWinSize = 5
+    p0.cornerRefinementMaxIterations = 30
+    p0.cornerRefinementMinAccuracy = 0.1
+    dets.append(aruco.ArucoDetector(aruco_dict, p0))
+
+
+    # Preset 1: harsh light / glare
+    p1 = aruco.DetectorParameters()
+    p1.minMarkerPerimeterRate = max(0.015, base_min_perimeter * 0.8)
+    p1.cornerRefinementWinSize = 5
+    p1.cornerRefinementMaxIterations = 30
+    p1.cornerRefinementMinAccuracy = 0.1
+    p1.adaptiveThreshWinSizeMin = 5
+    p1.adaptiveThreshWinSizeMax = 75
+    p1.adaptiveThreshWinSizeStep = 10
+    p1.adaptiveThreshConstant = 3
+    dets.append(aruco.ArucoDetector(aruco_dict, p1))
+
+    # Preset 2: low contrast / mixed shadows
+    p2 = aruco.DetectorParameters()
+    p2.minMarkerPerimeterRate = max(0.012, base_min_perimeter * 0.6)
+    p2.cornerRefinementWinSize = 5
+    p2.cornerRefinementMaxIterations = 30
+    p2.cornerRefinementMinAccuracy = 0.1
+    p2.adaptiveThreshWinSizeMin = 7
+    p2.adaptiveThreshWinSizeMax = 101
+    p2.adaptiveThreshWinSizeStep = 12
+    p2.adaptiveThreshConstant = 10
+    dets.append(aruco.ArucoDetector(aruco_dict, p2))
+
+    return dets
+
+
+def _as_detectors(detector_or_list):
+    if isinstance(detector_or_list, (list, tuple)):
+        return list(detector_or_list)
+    return [detector_or_list]
+
+
+def detect_markers_best(
+    frame,
+    detector_or_list,
+    score_ids=None,
+    must_have_ids=None,
+    require_must_have: int = 0,
+    budget: str = "full",
+):
+    """Детект маркеров с fallback по предобработке и параметрам детектора.
+
+    budget:
+      - "fast": только raw (максимум fps)
+      - "full": raw + (clahe/gamma/equalize/adapt/adapt_inv)
+    """
+    detectors = _as_detectors(detector_or_list)
+    score_ids = set() if score_ids is None else set(int(x) for x in score_ids)
+    must_have_ids = set() if must_have_ids is None else set(int(x) for x in must_have_ids)
+
+    modes_fast = ("raw",)
+    modes_full = ("raw", "clahe", "gamma", "equalize", "adapt", "adapt_inv")
+    modes = modes_full if budget == "full" else modes_fast
+
+    best = (None, None)
+    best_meta = {"mode": None, "preset": None, "must": 0, "total": 0}
+    best_score = -1
+
+    for mode in modes:
+        img = preprocess_for_aruco(frame, mode)
+        if img is None:
+            continue
+
+        for di, det in enumerate(detectors):
+            corners, ids, _ = det.detectMarkers(img)
+
+            if ids is None or len(ids) == 0:
+                total = 0
+                ids_flat = []
+            else:
+                ids_flat = [int(x[0]) for x in ids]
+                total = len(ids_flat)
+
+            must_cnt = sum(1 for mid in ids_flat if mid in must_have_ids)
+            score_cnt = sum(1 for mid in ids_flat if mid in score_ids)
+
+            score = must_cnt * 100000 + score_cnt * 1000 + total
+
+            # В режиме "top": нам жизненно важно иметь >= require_must_have ориентиров поля
+            if require_must_have > 0 and must_cnt < require_must_have:
+                # но всё равно запоминаем лучший "почти" — для диагностики
+                if score > best_score:
+                    best_score = score
+                    best = (corners, ids)
+                    best_meta = {"mode": mode, "preset": di, "must": must_cnt, "total": total}
+                continue
+
+            if score > best_score:
+                best_score = score
+                best = (corners, ids)
+                best_meta = {"mode": mode, "preset": di, "must": must_cnt, "total": total}
+
+                # быстрый early-exit: raw уже дал нужное количество опорных маркеров
+                if mode == "raw" and (require_must_have == 0 or must_cnt >= require_must_have):
+                    return corners, ids, best_meta
+
+    corners, ids = best
+
+    if DEBUG_PRINT:
+        print("[aruco] best:", best_meta)
+
+    if require_must_have > 0 and best_meta["must"] < require_must_have:
+        return None, None, best_meta
+
+    return corners, ids, best_meta
 
 
 def _solve_marker_pose(corner4, marker_length, camera_matrix, dist_coeffs):
@@ -104,8 +308,23 @@ def detect_cubes_multi(
     else:
         dist = dist_coeffs
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    corners, ids, _ = detector.detectMarkers(gray)
+    # Набор опорных маркеров поля (без них позу поля не посчитать)
+    rp = {int(r[0]): (float(r[1]), float(r[2]), float(r[3])) for r in real_points}
+    field_ids = set(rp.keys())
+    want = set(int(x) for x in marker_ids)
+    score_ids = want | field_ids
+
+    # 1) ДЕТЕКТ С FALLBACK:
+    #    - сначала raw (быстро)
+    #    - если не набрали >=4 полевых маркера, включаем full (CLAHE/gamma/...)
+    corners, ids, meta = detect_markers_best(
+        frame,
+        detector,
+        score_ids=score_ids,
+        must_have_ids=field_ids,
+        require_must_have=4,
+        budget="full",
+    )
 
     if ids is None or len(ids) == 0:
         return None
@@ -113,11 +332,10 @@ def detect_cubes_multi(
     ids_flat = [int(x[0]) for x in ids]
 
     # ------------------------------------------------------------
-    # 1) Поза поля относительно камеры:
+    # 2) Поза поля относительно камеры:
     #    (а) быстрый старт по центрам
     #    (б) refine по углам маркеров поля (если доступен solvePnPRefineLM)
     # ------------------------------------------------------------
-    rp = {int(r[0]): (float(r[1]), float(r[2]), float(r[3])) for r in real_points}
 
     obj_cent = []
     img_cent = []
@@ -292,14 +510,13 @@ if __name__ == "__main__":
     #cap2.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     #cap2.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
-    parameters = aruco.DetectorParameters()
-    parameters.minMarkerPerimeterRate = 0.03
-    parameters.cornerRefinementWinSize = 5
-    parameters.cornerRefinementMaxIterations = 30
-    parameters.cornerRefinementMinAccuracy = 0.1
+
+    # 3 пресета детектора под разные условия освещения.
+    detectors = make_detector_presets(aruco_dict, base_min_perimeter=0.03)
+    detector = detectors[0]  # базовый (для совместимости переменной)
 
     FRAME_CENTER = np.array((1920 / 2, 1080 / 2))
-    detector = aruco.ArucoDetector(aruco_dict, parameters)
+
     cv_data = np.load("calib_cam1.npz")
     camera_matrix = cv_data["K"]
     dist_coeffs = cv_data["dist"]
@@ -323,7 +540,7 @@ if __name__ == "__main__":
             continue
 
         frame = cv2.undistort(frame, camera_matrix, dist_coeffs)
-        p = detect_cubes_multi([0, 6, 8, 11], frame, detector, REAL_POINTS, camera_matrix, dist_coeffs, marker_length=1)
+        p = detect_cubes_multi([0, 6, 8, 11], frame, detectors, REAL_POINTS, camera_matrix, dist_coeffs, marker_length=1)
         cv2.imshow("frame", frame)
         cv2.waitKey(10)
         if p is None:
@@ -349,6 +566,7 @@ if __name__ == "__main__":
         man.Side.SetSyncServoRotation(100)
         man.Up.SetSyncServoRotation(-40)
         is_taken = False
+        wrist_phase_start = time.time()
         for side in range(100, -100, -15):
             man.Side.SetSyncServoRotation(side)
             time.sleep(1)
@@ -360,7 +578,16 @@ if __name__ == "__main__":
                     continue
                 cv2.imshow("frame", tmp_frame)
                 cv2.waitKey(10)
-                corners, ids, _ = detector.detectMarkers(tmp_frame)
+                use_full = (time.time() - wrist_phase_start) >= 5.0
+                corners, ids, meta = detect_markers_best(
+                    tmp_frame,
+                    detectors,
+                    score_ids={index},
+                    must_have_ids=set(),
+                    require_must_have=0,
+                    budget=("full" if use_full else "fast"),
+                )
+
                 if ids is not None and index in ids.flatten():
                     marker_detected += 1
                 time.sleep(0.25)
@@ -383,10 +610,12 @@ if __name__ == "__main__":
             #print(side)
         if cnt < 4:
             man.Up.SetSyncServoRotation(-90)
+            man.Side.SetAsyncServoRotation(0)
             time.sleep(1)
             man.RHand.SetSyncServoRotation(90)
             man.Base.SetAsyncServoRotation(-15 + 30*(cnt < 2))
-            man.Side.SetAsyncServoRotation(-67+15*(cnt%2==1))
+            time.sleep(1)
+            man.Side.SetSyncServoRotation(-67+15*(cnt%2==1))
             time.sleep(2)
             man.Up.SetSyncServoRotation(-42-30*(cnt%2==1))
             time.sleep(2)
@@ -396,8 +625,15 @@ if __name__ == "__main__":
             man.Side.SetAsyncServoRotation(-65)
             man.Up.SetSyncServoRotation(-90)
         cnt += 1
-
-
+        if cnt == 4:
+            man.Up.SetSyncServoRotation(-90)
+            man.Base.SetAsyncServoRotation(-100)
+            man.RHand.SetAsyncServoRotation(0)
+            man.Side.SetAsyncServoRotation(90)
+            time.sleep(2)
+            man.Hand.SetSyncServoRotation(40)
+            man.Up.SetSyncServoRotation(0)
+            break
 
         if cv2.waitKey(100) & 0xFF == ord('q'):
             break
