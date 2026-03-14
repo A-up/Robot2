@@ -70,12 +70,9 @@ def take_cube(cap, man, index, base, side, up):
             continue
         h, w = frame.shape[:2]
         frame_center = np.array([w//2, h//2])
-
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        ret, binary_simple = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
 
-        corners, ids, _ = detector.detectMarkers(binary_simple)
-        cv2.imshow("bin", binary_simple)
+        corners, ids, _ = detector.detectMarkers(gray)
 
         if ids is not None and index in ids.flatten():
             corners = corners[list(ids).index(index)][0]
