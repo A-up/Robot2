@@ -500,7 +500,7 @@ if __name__ == "__main__":
     if cap2.isOpened() is False:
         print("Error opening video stream 2 or file")
         exit(1)
-    #cap2 = cv2.VideoCapture(1)
+    #cap2 = cv2.Video  Capture(1)
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
@@ -522,112 +522,8 @@ if __name__ == "__main__":
     dist_coeffs = cv_data["dist"]
     REAL_POINTS = [[7, -18.5, 1.5, 0], [9, 19, 1.5, 0], [12, 19, 19, 0], [10, -19, 18.5, 0]]
     man = Manipulator()
-    cnt = 0
-    taken = []
     while True:
-        if cnt == 4:
-            break
-        man.Up.SetSyncServoRotation(-90)
-        man.Base.SetAsyncServoRotation(-100)
-        man.RHand.SetAsyncServoRotation(0)
-        man.Side.SetAsyncServoRotation(90)
-        time.sleep(2)
-        man.Hand.SetSyncServoRotation(40)
-        man.Up.SetSyncServoRotation(0)
-
-        ret, frame = cap.read()
-        if not ret:
-            continue
-
-        frame = cv2.undistort(frame, camera_matrix, dist_coeffs)
-        p = detect_cubes_multi([0, 6, 8, 11], frame, detectors, REAL_POINTS, camera_matrix, dist_coeffs, marker_length=1)
-        cv2.imshow("frame", frame)
-        cv2.waitKey(10)
-        if p is None:
-            print("can't detect marker")
-            time.sleep(2)
-            continue
-        #d, ang = decart_to_polar(p[0][0][:2])
-        #t_ang = base_angle(ang)
-        #man.Up.SetSyncServoRotation(-90)
-        print(p)
-        index = -1
-        for key, val in p.items():
-            if key not in taken:
-
-                index = key
-                break
-        if index == -1:
-            continue
-        coords = p[index][0]*10
-        angle = np.degrees(np.atan2(coords[1], coords[0]))
-        t_angle = base_angle(angle)
-        man.Base.SetSyncServoRotation(t_angle)
-        man.Side.SetSyncServoRotation(100)
-        man.Up.SetSyncServoRotation(-40)
-        is_taken = False
-        wrist_phase_start = time.time()
-        for side in range(85, -100, -15):
-            man.Side.SetSyncServoRotation(side)
-            man.Up.SetSyncServoRotation(side)
-            time.sleep(1)
-            marker_detected = 0
-
-            for i in range(3):
-                ret, tmp_frame = cap2.read()
-                if not ret:
-                    continue
-                cv2.imshow("frame", tmp_frame)
-                cv2.waitKey(10)
-                use_full = (time.time() - wrist_phase_start) >= 5.0
-                corners, ids, meta = detect_markers_best(
-                    tmp_frame,
-                    detectors,
-                    score_ids={index},
-                    must_have_ids=set(),
-                    require_must_have=0,
-                    budget=("full" if use_full else "fast"),
-                )
-
-                if ids is not None and index in ids.flatten():
-                    marker_detected += 1
-                time.sleep(0.25)
-            if marker_detected < 2:
-                continue
-            print("marker detected ", marker_detected)
-            ret, frame2 = cap2.read()
-            if not ret:
-                print("cannot grab frame2")
-                break
-            corners, ids, _ = detector.detectMarkers(frame2)
-            if ids is None:
-                continue
-            if index in ids.flatten():
-                r = take_cube(cap2, man, index, t_angle, side, side)
-                if r is not None:
-                    is_taken = False
-                    break
-                is_taken = True
-                break
-        if not is_taken:
-            continue
-            #print(side)
-        taken.append(index)
-        if cnt < 4:
-            man.Up.SetSyncServoRotation(-40)
-            man.Side.SetSyncServoRotation(30)
-            man.Up.SetSyncServoRotation(-90)
-            man.RHand.SetSyncServoRotation(90)
-            man.Base.SetSyncServoRotation(-15 + 30*(cnt < 2))
-            man.Side.SetSyncServoRotation(-67+15*(cnt%2==1))
-            man.Up.SetSyncServoRotation(-42-30*(cnt%2==1))
-            man.Hand.SetSyncServoRotation(40)
-            man.Side.SetAsyncServoRotation(-80)
-            #man.Up.SetSyncServoRotation(-10)
-            man.Side.SetAsyncServoRotation(-65)
-            man.Up.SetSyncServoRotation(-90)
-        cnt += 1
-        if cnt == 4:
+        while True:
             man.Up.SetSyncServoRotation(-90)
             man.Base.SetAsyncServoRotation(-100)
             man.RHand.SetAsyncServoRotation(0)
@@ -635,7 +531,138 @@ if __name__ == "__main__":
             time.sleep(2)
             man.Hand.SetSyncServoRotation(40)
             man.Up.SetSyncServoRotation(0)
-            break
+            ret, frame = cap.read()
+            if not ret:
+                time.sleep(3)
+                continue
+            p = detect_cubes_multi([0, 6, 8, 11], frame, detectors, REAL_POINTS, camera_matrix, dist_coeffs, marker_length=1)
+            if p is not None and len(p) == 4:
+                break
+            cv2.imshow("frame", frame)
+            cv2.waitKey(10)
+            time.sleep(3)
 
-        if cv2.waitKey(100) & 0xFF == ord('q'):
-            break
+        cnt = 0
+        taken = []
+        while True:
+            if cnt == 4:
+                break
+            man.Up.SetSyncServoRotation(-90)
+            man.Base.SetAsyncServoRotation(-100)
+            man.RHand.SetAsyncServoRotation(0)
+            man.Side.SetAsyncServoRotation(90)
+            time.sleep(2)
+            man.Hand.SetSyncServoRotation(40)
+            man.Up.SetSyncServoRotation(0)
+
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            frame = cv2.undistort(frame, camera_matrix, dist_coeffs)
+            p = detect_cubes_multi([0, 6, 8, 11], frame, detectors, REAL_POINTS, camera_matrix, dist_coeffs, marker_length=1)
+            cv2.imshow("frame", frame)
+            cv2.waitKey(10)
+            if p is None:
+                print("can't detect marker")
+                time.sleep(2)
+                continue
+            #d, ang = decart_to_polar(p[0][0][:2])
+            #t_ang = base_angle(ang)
+            #man.Up.SetSyncServoRotation(-90)
+            print(p)
+            index = -1
+            for key, val in p.items():
+                # coords = val[0]*10
+                # if -40 < coords[0] < 60 and 140 < coords[1] < 200 and index not in taken:
+                #     taken.append(index)
+                #     cnt += 1
+                # if not (-60 < coords[0] < 60 and 140 < coords[1] < 200) and index in taken:
+                #     taken.remove(index)
+                #     cnt -= 1
+                if key not in taken:
+                    index = key
+                    break
+            if index == -1:
+                continue
+            coords = p[index][0]*10
+
+            angle = np.degrees(np.atan2(coords[1], coords[0]))
+            t_angle = base_angle(angle)
+            man.Base.SetSyncServoRotation(t_angle)
+            man.Side.SetSyncServoRotation(100)
+            man.Up.SetSyncServoRotation(-40)
+            is_taken = False
+            wrist_phase_start = time.time()
+            for side in range(85, -100, -15):
+                man.Side.SetSyncServoRotation(side)
+                man.Up.SetSyncServoRotation(side)
+                time.sleep(1)
+                marker_detected = 0
+
+                for i in range(3):
+                    ret, tmp_frame = cap2.read()
+                    if not ret:
+                        continue
+                    cv2.imshow("frame", tmp_frame)
+                    cv2.waitKey(10)
+                    use_full = (time.time() - wrist_phase_start) >= 5.0
+                    corners, ids, meta = detect_markers_best(
+                        tmp_frame,
+                        detectors,
+                        score_ids={index},
+                        must_have_ids=set(),
+                        require_must_have=0,
+                        budget=("full" if use_full else "fast"),
+                    )
+
+                    if ids is not None and index in ids.flatten():
+                        marker_detected += 1
+                    time.sleep(0.25)
+                if marker_detected < 2:
+                    continue
+                print("marker detected ", marker_detected)
+                ret, frame2 = cap2.read()
+                if not ret:
+                    print("cannot grab frame2")
+                    break
+                corners, ids, _ = detector.detectMarkers(frame2)
+                if ids is None:
+                    continue
+                if index in ids.flatten():
+                    r = take_cube(cap2, man, index, t_angle, side, side)
+                    if r is not None:
+                        is_taken = False
+                        break
+                    is_taken = True
+                    break
+            if not is_taken:
+                continue
+                #print(side)
+            taken.append(index)
+            if cnt < 4:
+                man.Up.SetSyncServoRotation(-40)
+                man.Side.SetSyncServoRotation(30)
+                man.Up.SetSyncServoRotation(-90)
+                man.RHand.SetSyncServoRotation(90)
+                man.Base.SetSyncServoRotation(-15 + 30*(cnt < 2))
+                man.Side.SetSyncServoRotation(-67+15*(cnt%2==1))
+                man.Up.SetSyncServoRotation(-42-30*(cnt%2==1))
+                man.Hand.SetSyncServoRotation(40)
+                man.Side.SetAsyncServoRotation(-80)
+                #man.Up.SetSyncServoRotation(-10)
+                man.Side.SetAsyncServoRotation(-65)
+                man.Up.SetSyncServoRotation(-90)
+            cnt += 1
+            if cnt == 4:
+                man.Up.SetSyncServoRotation(-90)
+                man.Base.SetAsyncServoRotation(-100)
+                man.RHand.SetAsyncServoRotation(0)
+                man.Side.SetAsyncServoRotation(90)
+                time.sleep(2)
+                man.Hand.SetSyncServoRotation(40)
+                man.Up.SetSyncServoRotation(0)
+                break
+
+            if cv2.waitKey(100) & 0xFF == ord('q'):
+                break

@@ -260,17 +260,17 @@ def take_cube(cap, man, index, base, side, up):
             if done:
                 final = True
                 #if angle > 10:
-                rhand_ang = -angle
+                rhand_ang = angle
                 man.RHand.SetSyncServoRotation(rhand_ang)
                 man.Hand.SetSyncServoRotation(50)
-                side_ang -= 90
+                side_ang -= 75
                 up_ang -= 15
                 print("target_angle:", angle)
                 man.Up.SetSyncServoRotation(up_ang)
                 man.Side.SetSyncServoRotation(side_ang)
 
 
-                up_ang += 55
+                up_ang += 40
                 man.Up.SetSyncServoRotation(up_ang)
                 man.Hand.SetSyncServoRotation(-80)
                 up_ang -= 70
