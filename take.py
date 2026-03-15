@@ -226,6 +226,8 @@ def take_cube(cap, man, index, base, side, up):
             #print(angle)
             if angle > 90:
                 angle = 180 - angle
+            if p0[1] < p1[1]:
+                angle = -angle
             #print(angle)
             #continue
             done = True
@@ -239,28 +241,27 @@ def take_cube(cap, man, index, base, side, up):
                 if abs(dy) > 50:
                     done = False
                     if dy > 0:
-                        side_ang += abs(2*dy/100)
+                        side_ang += abs(4*dy/100)
                     else:
-                        side_ang -= abs(2*dy/100)
+                        side_ang -= abs(4*dy/100)
                 if (abs(da)) > 5000:
                     done = False
                     if da > 0:
-                        up_ang -= abs(2*da/5000)
+                        up_ang -= abs(1*da/5000)
                     else:
-                        up_ang += abs(2*da/5000)
+                        up_ang += abs(1*da/5000)
             print(dx, dy, da, base_ang, side_ang, up_ang)
-            angle = np.clip(angle, 0, 90)
 
             #print(angle)
-            base_ang = round(base_ang)
-            side_ang = round(side_ang)
-            up_ang = round(up_ang)
+            base_ang = np.clip(round(base_ang), -100, 100)
+            side_ang = np.clip(round(side_ang), -100, 100)
+            up_ang = np.clip(round(up_ang), -100, 100)
             #print(base_ang, side_ang, up_ang)
             if done:
                 final = True
-                if angle > 10:
-                    rhand_ang = angle
-                    man.RHand.SetSyncServoRotation(rhand_ang)
+                #if angle > 10:
+                rhand_ang = -angle
+                man.RHand.SetSyncServoRotation(rhand_ang)
                 man.Hand.SetSyncServoRotation(50)
                 side_ang -= 90
                 up_ang -= 15
@@ -276,6 +277,8 @@ def take_cube(cap, man, index, base, side, up):
                 man.Up.SetSyncServoRotation(up_ang)
                 man.RHand.SetSyncServoRotation(0)
                 time.sleep(3)
+                if man.GetHandVoltage() < 0.1:
+                    return False
 
                 break
         else:
@@ -283,7 +286,7 @@ def take_cube(cap, man, index, base, side, up):
         # даём алгоритму минимум 12 сек на поиск/дожим,
         # при этом фильтры включатся автоматически после FILTERS_AFTER_SEC
         if (time.time() - take_phase_start) >= 100.0:
-            break
+            return False
 
         #man.Base.SetSyncServoRotation(base_ang)
         #man.Side.SetSyncServoRotation(side_ang)

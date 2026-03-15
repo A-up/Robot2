@@ -554,7 +554,7 @@ if __name__ == "__main__":
         index = -1
         for key, val in p.items():
             if key not in taken:
-                taken.append(key)
+
                 index = key
                 break
         if index == -1:
@@ -567,8 +567,9 @@ if __name__ == "__main__":
         man.Up.SetSyncServoRotation(-40)
         is_taken = False
         wrist_phase_start = time.time()
-        for side in range(100, -100, -15):
+        for side in range(85, -100, -15):
             man.Side.SetSyncServoRotation(side)
+            man.Up.SetSyncServoRotation(side)
             time.sleep(1)
             marker_detected = 0
 
@@ -602,23 +603,24 @@ if __name__ == "__main__":
             if ids is None:
                 continue
             if index in ids.flatten():
-                take_cube(cap2, man, index, t_angle, side-10, -40)
+                r = take_cube(cap2, man, index, t_angle, side, side)
+                if r is not None:
+                    is_taken = False
+                    break
                 is_taken = True
                 break
         if not is_taken:
             continue
             #print(side)
+        taken.append(index)
         if cnt < 4:
+            man.Up.SetSyncServoRotation(-40)
+            man.Side.SetSyncServoRotation(30)
             man.Up.SetSyncServoRotation(-90)
-            man.Side.SetAsyncServoRotation(0)
-            time.sleep(1)
             man.RHand.SetSyncServoRotation(90)
-            man.Base.SetAsyncServoRotation(-15 + 30*(cnt < 2))
-            time.sleep(1)
+            man.Base.SetSyncServoRotation(-15 + 30*(cnt < 2))
             man.Side.SetSyncServoRotation(-67+15*(cnt%2==1))
-            time.sleep(2)
             man.Up.SetSyncServoRotation(-42-30*(cnt%2==1))
-            time.sleep(2)
             man.Hand.SetSyncServoRotation(40)
             man.Side.SetAsyncServoRotation(-80)
             #man.Up.SetSyncServoRotation(-10)
