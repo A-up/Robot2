@@ -492,8 +492,8 @@ if __name__ == "__main__":
     from srv import Manipulator
     #from commands_new import execute, _predict_batch
     from take import take_cube
-    cap = cv2.VideoCapture(2)
-    cap2 = cv2.VideoCapture(1)
+    cap = cv2.VideoCapture(1)
+    cap2 = cv2.VideoCapture(0)
     if cap.isOpened() is False:
         print("Error opening video stream 1 or file")
         exit(1)
